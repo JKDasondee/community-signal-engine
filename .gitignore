@@ -1,0 +1,7 @@
+data/*.db
+data/*.json
+data/*.parquet
+reports/
+__pycache__/
+*.pyc
+.env
