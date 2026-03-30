@@ -1,0 +1,5 @@
+discord.py>=2.3
+requests>=2.31
+numpy>=1.24
+pandas>=2.0
+playwright>=1.40
