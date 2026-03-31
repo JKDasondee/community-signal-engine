@@ -261,6 +261,8 @@ class ArenaBot(discord.Client):
     def __init__(self):
         intents = Intents.default()
         intents.message_content = True
+        intents.dm_messages = True
+        intents.members = True
         super().__init__(intents=intents)
         self.conn = init_db()
         self.responded: set[int] = set()
