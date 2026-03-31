@@ -44,6 +44,9 @@ TOKEN_ICON = {
 }
 
 def get_ollama_tip(name, syms, wts, qs):
+    if name is None:
+        # fast path: return hardcoded fallback, no API call
+        return _fallback_tip(qs)
     try:
         alloc = ", ".join(f"{s} {w:.0f}%" for s, w in zip(syms, wts))
         prompt = (
@@ -67,7 +70,9 @@ def get_ollama_tip(name, syms, wts, qs):
                 return tip
     except Exception:
         pass
-    # fallback tips
+    return _fallback_tip(qs)
+
+def _fallback_tip(qs):
     if qs.n_assets == 1:
         return "Single asset = max conviction. Splitting into 3-4 assets could cut risk without losing much upside."
     if qs.annual_vol > 0.6:
@@ -310,56 +315,56 @@ class ArenaBot(discord.Client):
         print(f"  [{message.author}] scoring {sid}...")
 
         try:
-            async with message.channel.typing():
-                import time as _t
-                t0 = _t.perf_counter()
+            import time as _t
+            t0 = _t.perf_counter()
 
-                # STEP 1: concurrent API fetch (strategy + history + pnl in parallel)
-                p = await asyncio.to_thread(parse_portfolio, sid, self.conn)
-                if not p:
-                    return
-                t1 = _t.perf_counter()
+            # STEP 1: parse + prices in parallel
+            parse_task = asyncio.to_thread(parse_portfolio, sid, self.conn)
+            p = await parse_task
+            if not p:
+                return
 
-                p.discord_user = str(message.author)
-                save_portfolio(self.conn, p)
+            p.discord_user = str(message.author)
+            save_portfolio(self.conn, p)
 
-                active = [a for a in p.assets if a.weight > 0]
-                syms = [a.symbol for a in active]
-                wts = [a.weight for a in active]
-                aids = [a.asset_id for a in active]
+            active = [a for a in p.assets if a.weight > 0]
+            syms = [a.symbol for a in active]
+            wts = [a.weight for a in active]
+            aids = [a.asset_id for a in active]
 
-                # STEP 2: concurrent price fetch (all tokens in parallel)
-                live_prices = await fetch_prices_concurrent(aids)
-                t2 = _t.perf_counter()
+            # STEP 2: prices concurrent
+            live_prices = await fetch_prices_concurrent(aids)
 
-                # STEP 3: score (pure CPU, ~6ms)
-                qs = quant_score(syms, wts, self.prices, self.conn)
+            # STEP 3: score + rank (fast, ~6ms + O(log N))
+            qs = quant_score(syms, wts, self.prices, self.conn)
+            live = enrich_quant_score(syms, wts, aids, live_prices)
+            if live["vol_annualized"] > 0 and qs.annual_vol == 0:
+                qs.annual_vol = live["vol_annualized"]
+            if live["avg_correlation"] != 0 and qs.avg_correlation == 0:
+                qs.avg_correlation = live["avg_correlation"]
 
-                live = enrich_quant_score(syms, wts, aids, live_prices)
-                if live["vol_annualized"] > 0 and qs.annual_vol == 0:
-                    qs.annual_vol = live["vol_annualized"]
-                if live["avg_correlation"] != 0 and qs.avg_correlation == 0:
-                    qs.avg_correlation = live["avg_correlation"]
-                t3 = _t.perf_counter()
+            rank, total = self.rank_idx.query(qs.total)
+            self.rank_idx.insert(qs.total)
 
-                # STEP 4: O(log N) rank lookup instead of O(N) rescore
-                rank, total = self.rank_idx.query(qs.total)
-                self.rank_idx.insert(qs.total)  # update for next query
-                t4 = _t.perf_counter()
+            # STEP 4: send embed IMMEDIATELY with fallback tip
+            fallback_tip = get_ollama_tip(None, syms, wts, qs)  # uses hardcoded fallback, instant
+            embed = build_embed(p, qs, rank, total, fallback_tip, self.conn, live)
+            sent_msg = await message.reply(embed=embed, mention_author=False)
+            t1 = _t.perf_counter()
+            print(f"  sent: {qs.total}/100 ({qs.grade}) in {(t1-t0)*1000:.0f}ms")
 
-                # STEP 5: AI tip (async, ~200ms cached / ~2s uncached)
-                tip = await asyncio.to_thread(get_ollama_tip, p.blueprint_name or sid, syms, wts, qs)
-                t5 = _t.perf_counter()
+            # STEP 5: generate AI tip in background, edit message when ready
+            async def update_with_ai_tip():
+                try:
+                    ai_tip = await asyncio.to_thread(get_ollama_tip, p.blueprint_name or sid, syms, wts, qs)
+                    if ai_tip and ai_tip != fallback_tip:
+                        updated_embed = build_embed(p, qs, rank, total, ai_tip, self.conn, live)
+                        await sent_msg.edit(embed=updated_embed)
+                        print(f"  tip updated: {((_t.perf_counter()-t0)*1000):.0f}ms")
+                except Exception:
+                    pass
 
-                embed = build_embed(p, qs, rank, total, tip, self.conn, live)
-                await message.reply(embed=embed, mention_author=False)
-                t6 = _t.perf_counter()
-
-                print(f"  scored: {qs.total}/100 ({qs.grade}) "
-                      f"[parse:{(t1-t0)*1000:.0f} price:{(t2-t1)*1000:.0f} "
-                      f"score:{(t3-t2)*1000:.0f} rank:{(t4-t3)*1000:.3f} "
-                      f"tip:{(t5-t4)*1000:.0f} send:{(t6-t5)*1000:.0f} "
-                      f"total:{(t6-t0)*1000:.0f}ms]")
+            asyncio.create_task(update_with_ai_tip())
 
         except Exception as e:
             print(f"  error: {e}")
