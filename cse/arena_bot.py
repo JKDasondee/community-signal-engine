@@ -54,23 +54,15 @@ def get_ollama_tip(name, syms, wts, qs):
             f"Score: {qs.total}/100, Type: {qs.strategy_type}, Risk: {qs.risk_label}\n"
             f"Sharpe: {qs.sharpe:.2f}, Vol: {qs.annual_vol:.1%}, Herding: {qs.herding_score:.0%}"
         )
+        # use native ollama api with think:false for speed
         r = rq.post(
-            OLLAMA_URL.rstrip("/").replace("/v1/", "/v1") + "/chat/completions",
-            json={"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 300, "temperature": 0.7},
-            timeout=30,
+            "http://localhost:11434/api/chat",
+            json={"model": OLLAMA_MODEL, "stream": False, "think": False,
+                  "messages": [{"role": "user", "content": prompt}]},
+            timeout=15,
         )
         if r.status_code == 200:
-            msg = r.json()["choices"][0]["message"]
-            # qwen3 puts answer in content, reasoning in separate field
-            tip = msg.get("content", "").strip()
-            if not tip:
-                # some models return reasoning only — extract from there
-                reasoning = msg.get("reasoning", "")
-                if reasoning:
-                    # take last sentence of reasoning as tip
-                    sentences = [s.strip() for s in reasoning.split(".") if len(s.strip()) > 10]
-                    tip = sentences[-1] + "." if sentences else ""
+            tip = r.json()["message"]["content"].strip()
             if tip:
                 return tip
     except Exception:
