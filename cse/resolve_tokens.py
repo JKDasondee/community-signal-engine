@@ -34,7 +34,7 @@ def resolve_via_coingecko(address: str, chain: str) -> tuple[str, str] | None:
         if r.status_code == 200:
             d = r.json()
             return (d.get("symbol", "").upper(), d.get("name", ""))
-    except:
+    except Exception:
         pass
     return None
 

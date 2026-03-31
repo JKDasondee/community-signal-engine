@@ -19,7 +19,7 @@ async def _fetch(session: aiohttp.ClientSession, endpoint: str, params: dict) ->
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
             if r.status == 200:
                 return await r.json()
-    except:
+    except Exception:
         pass
     return None
 
@@ -77,6 +77,6 @@ async def fetch_prices_concurrent(asset_ids: list[str]) -> dict:
                     "ondo_ticker": ondo.get("ticker", ""),
                     "ondo_tags": ondo.get("tags", []),
                 }
-            except:
+            except Exception:
                 pass
     return out

@@ -35,7 +35,7 @@ def fetch_market_data(asset_id: str) -> dict | None:
             data = r.json()["result"]["data"]["json"]
             _price_cache[asset_id] = (time.time(), data)
             return data
-    except:
+    except Exception:
         pass
     return None
 

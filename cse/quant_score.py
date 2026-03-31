@@ -142,7 +142,7 @@ def herding_score(symbols: list[str], weights: list[float], conn: sqlite3.Connec
                 w = a["weight"]
                 sym_totals[s] = sym_totals.get(s, 0) + w
             count += 1
-        except:
+        except Exception:
             pass
 
     if count == 0:
@@ -153,10 +153,12 @@ def herding_score(symbols: list[str], weights: list[float], conn: sqlite3.Connec
         sym_totals[s] /= count
 
     # build portfolio vector in same space
+    tw = sum(weights)
+    sym_w = dict(zip(symbols, weights))
     all_syms = set(sym_totals.keys()) | set(symbols)
     community_vec = np.array([sym_totals.get(s, 0) for s in all_syms])
     portfolio_vec = np.array([
-        weights[symbols.index(s)] / sum(weights) * 100 if s in symbols else 0
+        sym_w.get(s, 0) / tw * 100 if tw > 0 else 0
         for s in all_syms
     ])
 
@@ -206,7 +208,7 @@ def frontier_distance(symbols: list[str], weights: list[float], prices: pd.DataF
 
         # distance = excess volatility vs frontier
         return max(0.0, float(port_vol - frontier_vol))
-    except:
+    except Exception:
         return 0.0
 
 def composite_score(
@@ -337,7 +339,7 @@ def main():
             wts = [a["weight"] for a in assets]
             qs = score_portfolio(syms, wts, prices, conn)
             results.append((sid, user, qs))
-        except:
+        except Exception:
             continue
 
     results.sort(key=lambda x: x[2].total, reverse=True)

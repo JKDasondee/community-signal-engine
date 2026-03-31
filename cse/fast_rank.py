@@ -33,7 +33,7 @@ class RankIndex:
                 if syms:
                     s = score_fn(syms, wts)
                     self.scores.append(s)
-            except:
+            except Exception:
                 continue
         self.scores.sort()
         self.total = len(self.scores)
