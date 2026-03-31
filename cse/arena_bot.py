@@ -271,20 +271,29 @@ class ArenaBot(discord.Client):
             save_tokens(self.conn, tokens)
 
     async def on_ready(self):
-        print(f"Arena bot online: {self.user}")
-        print(f"Guilds: {[g.name for g in self.guilds]}")
+        print(f"Arena bot online: {self.user}", flush=True)
+        print(f"Guilds: {[g.name for g in self.guilds]}", flush=True)
         db_count = self.conn.execute("SELECT COUNT(*) FROM portfolios").fetchone()[0]
-        print(f"DB: {db_count} portfolios | Prices: {'loaded' if self.prices is not None else 'NONE'}")
+        print(f"DB: {db_count} portfolios | Prices: {'loaded' if self.prices is not None else 'NONE'}", flush=True)
+        print(f"Mode: {'DM only' if not ALLOWED_CHANNELS else f'channels: {ALLOWED_CHANNELS}'}", flush=True)
+        print(f"Ready to receive messages.", flush=True)
 
-        # precompute rank index O(P) once at startup
-        import time
-        t0 = time.perf_counter()
-        def quick_score(syms, wts):
-            return quant_score(syms, wts, self.prices, self.conn).total
-        self.rank_idx.build(self.conn, quick_score)
-        t1 = time.perf_counter()
-        print(f"Rank index: {self.rank_idx.total} portfolios precomputed in {(t1-t0)*1000:.0f}ms")
-        print(f"Mode: {'DM only' if not ALLOWED_CHANNELS else f'channels: {ALLOWED_CHANNELS}'}")
+        # precompute rank index in background (don't block message handling)
+        async def build_rank():
+            import time, sqlite3
+            t0 = time.perf_counter()
+            def _build():
+                bg_conn = sqlite3.connect(str(DATA_DIR / "portfolios.db"))
+                bg_conn.execute("PRAGMA journal_mode=WAL")
+                def quick_score(syms, wts):
+                    return quant_score(syms, wts, self.prices, bg_conn).total
+                self.rank_idx.build(bg_conn, quick_score)
+                bg_conn.close()
+            await asyncio.to_thread(_build)
+            t1 = time.perf_counter()
+            print(f"Rank index: {self.rank_idx.total} portfolios in {(t1-t0)*1000:.0f}ms", flush=True)
+
+        asyncio.create_task(build_rank())
 
     async def on_message(self, message):
         if message.author == self.user or message.author.bot:
@@ -356,12 +365,15 @@ class ArenaBot(discord.Client):
             async def update_with_ai_tip():
                 try:
                     ai_tip = await asyncio.to_thread(get_ollama_tip, p.blueprint_name or sid, syms, wts, qs)
+                    print(f"  ai_tip: {repr(ai_tip[:60]) if ai_tip else 'NONE'}", flush=True)
                     if ai_tip and ai_tip != fallback_tip:
                         updated_embed = build_embed(p, qs, rank, total, ai_tip, self.conn, live)
                         await sent_msg.edit(embed=updated_embed)
-                        print(f"  tip updated: {((_t.perf_counter()-t0)*1000):.0f}ms")
-                except Exception:
-                    pass
+                        print(f"  tip updated: {((_t.perf_counter()-t0)*1000):.0f}ms", flush=True)
+                except Exception as e:
+                    print(f"  tip error: {e}", flush=True)
+                    import traceback
+                    traceback.print_exc()
 
             asyncio.create_task(update_with_ai_tip())
 
