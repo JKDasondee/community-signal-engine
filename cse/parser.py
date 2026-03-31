@@ -24,7 +24,7 @@ def parse_api_responses(conn: sqlite3.Connection):
             continue
         try:
             data = json.loads(body)
-        except:
+        except Exception:
             continue
 
         allocations = extract_allocations(data, pid)
@@ -99,7 +99,7 @@ def parse_allocation_item(item: dict) -> dict | None:
                 pass  # already in pct
             elif w <= 1:
                 w = w * 100  # convert to pct
-        except:
+        except Exception:
             return None
         return {"symbol": str(symbol), "name": str(name), "weight": w, "address": str(address), "chain": str(chain)}
     return None
@@ -140,7 +140,7 @@ def parse_page_text(conn: sqlite3.Connection):
                                 "INSERT INTO allocations (portfolio_id, asset_symbol, weight_pct) VALUES (?,?,?)",
                                 (pid, sym, w)
                             )
-                    except:
+                    except Exception:
                         pass
                 conn.commit()
                 count = conn.execute(

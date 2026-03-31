@@ -62,7 +62,7 @@ def get_ollama_tip(name, syms, wts, qs):
         )
         if r.status_code == 200:
             return r.json()["choices"][0]["message"]["content"].strip()
-    except:
+    except Exception:
         pass
     # fallback tips
     if qs.n_assets == 1:
@@ -96,7 +96,7 @@ def community_rank(score, conn, prices):
             a = json.loads(aj)
             s = quant_score([x["symbol"] for x in a], [x["weight"] for x in a], prices, conn)
             scores.append(s.total)
-        except:
+        except Exception:
             pass
     scores.sort(reverse=True)
     return sum(1 for s in scores if s > score) + 1, max(len(scores), 1)
@@ -112,7 +112,7 @@ def find_similar(conn, syms, current_id, limit=3):
             overlap = len(syms & other) / max(len(syms | other), 1)
             if overlap >= 0.5:
                 similar.append((user, round(overlap * 100)))
-        except:
+        except Exception:
             pass
     similar.sort(key=lambda x: x[1], reverse=True)
     return similar[:limit]

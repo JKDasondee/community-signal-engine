@@ -90,7 +90,7 @@ def compute_factor_matrix(conn: sqlite3.Connection, prices: pd.DataFrame) -> pd.
                 "f_n_assets": n,
                 "r7": r7, "r14": r14, "r30": r30,
             })
-        except:
+        except Exception:
             continue
 
     return pd.DataFrame(records)

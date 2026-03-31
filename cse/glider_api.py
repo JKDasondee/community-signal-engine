@@ -105,7 +105,7 @@ def resolve_symbol(asset_id: str, conn: sqlite3.Connection | None = None) -> tup
             if p and p["symbol"]:
                 sym, name = p["symbol"], p["name"]
                 _token_map[asset_id] = {"symbol": sym, "name": name}
-        except:
+        except Exception:
             pass
     return sym or asset_id[:10], name
 
@@ -175,9 +175,11 @@ def parse_portfolio(sid: str, conn: sqlite3.Connection | None = None) -> Portfol
             if weight_type == "equal" or not weightings or i >= len(weightings):
                 w = round(100.0 / n, 2) if n > 0 else 0
             else:
-                raw_val = float(weightings[i])
+                raw_val = float(weightings[i]) if weightings[i] else 0
                 raw_sum = sum(float(x) for x in weightings if x)
-                if raw_sum > 10:
+                if raw_sum == 0:
+                    w = round(100.0 / n, 2) if n > 0 else 0
+                elif raw_sum > 10:
                     w = round(raw_val, 2)
                 else:
                     w = round(raw_val * 100, 2)
@@ -212,7 +214,7 @@ def parse_portfolio(sid: str, conn: sqlite3.Connection | None = None) -> Portfol
                     sym, nm = resolve_symbol(aid, conn)
                     assets.append(Asset(asset_id=aid, symbol=sym, name=nm, weight=0, chain_id=chain))
                     existing_aids.add(aid)
-        except:
+        except Exception:
             pass
 
     # PnL — use ACTUAL holdings (overrides template weights with real balances)
@@ -280,7 +282,7 @@ def parse_portfolio(sid: str, conn: sqlite3.Connection | None = None) -> Portfol
                         s = pnl_map[a.asset_id]["sym"]
                         if s and (not a.symbol or a.symbol.startswith("0x")):
                             a.symbol = s
-        except:
+        except Exception:
             pass
 
     # Schedule
@@ -291,7 +293,7 @@ def parse_portfolio(sid: str, conn: sqlite3.Connection | None = None) -> Portfol
             intervals = sched["result"]["data"]["json"]["schedule"]["intervals"]
             if intervals:
                 rebal_ms = intervals[0].get("every", 0)
-        except:
+        except Exception:
             pass
 
     return Portfolio(
@@ -309,6 +311,7 @@ def parse_portfolio(sid: str, conn: sqlite3.Connection | None = None) -> Portfol
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS portfolios (
             strategy_id TEXT PRIMARY KEY,
@@ -350,25 +353,26 @@ def init_db():
     return conn
 
 def save_portfolio(conn: sqlite3.Connection, p: Portfolio):
-    conn.execute(
-        """INSERT OR REPLACE INTO portfolios
-        (strategy_id, discord_user, blueprint_name, owner_address,
-         current_value_usd, total_cost_basis, realized_pnl,
-         rebalance_interval_ms, num_assets, assets_json, scraped_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-        (p.strategy_id, p.discord_user, p.blueprint_name, p.owner_address,
-         p.current_value_usd, p.total_cost_basis, p.realized_pnl,
-         p.rebalance_interval_ms, len(p.assets),
-         json.dumps([asdict(a) for a in p.assets]), p.scraped_at)
-    )
-    for a in p.assets:
+    with conn:  # atomic transaction — rolls back if anything fails
         conn.execute(
-            """INSERT OR REPLACE INTO allocations
-            (strategy_id, asset_id, symbol, name, weight_pct, chain_id)
-            VALUES (?,?,?,?,?,?)""",
-            (p.strategy_id, a.asset_id, a.symbol, a.name, a.weight, a.chain_id)
+            """INSERT OR REPLACE INTO portfolios
+            (strategy_id, discord_user, blueprint_name, owner_address,
+             current_value_usd, total_cost_basis, realized_pnl,
+             rebalance_interval_ms, num_assets, assets_json, scraped_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (p.strategy_id, p.discord_user, p.blueprint_name, p.owner_address,
+             p.current_value_usd, p.total_cost_basis, p.realized_pnl,
+             p.rebalance_interval_ms, len(p.assets),
+             json.dumps([asdict(a) for a in p.assets]), p.scraped_at)
         )
-    conn.commit()
+        conn.execute("DELETE FROM allocations WHERE strategy_id = ?", (p.strategy_id,))
+        for a in p.assets:
+            conn.execute(
+                """INSERT INTO allocations
+                (strategy_id, asset_id, symbol, name, weight_pct, chain_id)
+                VALUES (?,?,?,?,?,?)""",
+                (p.strategy_id, a.asset_id, a.symbol, a.name, a.weight, a.chain_id)
+            )
 
 def save_tokens(conn: sqlite3.Connection, data: dict):
     try:
