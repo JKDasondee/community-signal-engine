@@ -57,11 +57,22 @@ def get_ollama_tip(name, syms, wts, qs):
         r = rq.post(
             OLLAMA_URL.rstrip("/").replace("/v1/", "/v1") + "/chat/completions",
             json={"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 80, "temperature": 0.7},
-            timeout=15,
+                  "max_tokens": 300, "temperature": 0.7},
+            timeout=30,
         )
         if r.status_code == 200:
-            return r.json()["choices"][0]["message"]["content"].strip()
+            msg = r.json()["choices"][0]["message"]
+            # qwen3 puts answer in content, reasoning in separate field
+            tip = msg.get("content", "").strip()
+            if not tip:
+                # some models return reasoning only — extract from there
+                reasoning = msg.get("reasoning", "")
+                if reasoning:
+                    # take last sentence of reasoning as tip
+                    sentences = [s.strip() for s in reasoning.split(".") if len(s.strip()) > 10]
+                    tip = sentences[-1] + "." if sentences else ""
+            if tip:
+                return tip
     except Exception:
         pass
     # fallback tips
