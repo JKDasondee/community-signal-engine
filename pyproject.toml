@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "community-signal-engine"
+version = "2.0.0"
+description = "Portfolio Arena — real-time community portfolio intelligence for DeFi"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [{name = "Jay Dasondee", email = "jay@glider.fi"}]
+keywords = ["defi", "portfolio", "risk", "discord", "community", "quant"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+    "discord.py>=2.3",
+    "requests>=2.31",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
+    "python-dotenv>=1.0",
+    "pyarrow>=14.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+arena-bot = "cse.arena_bot:main"
+arena-scrape = "cse.scrape_history:scrape_and_score"
+arena-score = "cse.quant_score:main"
+arena-prices = "cse.glider_prices:main"
+
+[project.urls]
+Homepage = "https://github.com/JKDasondee/community-signal-engine"
+Repository = "https://github.com/JKDasondee/community-signal-engine"
+
+[tool.setuptools.packages.find]
+include = ["cse*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

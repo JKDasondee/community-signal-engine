@@ -96,7 +96,45 @@ def resolve_symbol(asset_id: str, conn: sqlite3.Connection | None = None) -> tup
     name = t.get("name", "")
     if not sym and "eeeeeeeeeeeeee" in asset_id:
         sym, name = "ETH", "Ethereum"
+    # fallback: fetch from Glider market data API
+    if not sym or sym.startswith("0x"):
+        try:
+            from cse.glider_prices import get_token_price
+            p = get_token_price(asset_id)
+            if p and p["symbol"]:
+                sym, name = p["symbol"], p["name"]
+                _token_map[asset_id] = {"symbol": sym, "name": name}
+        except:
+            pass
     return sym or asset_id[:10], name
+
+def extract_assets_recursive(block: dict, conn=None) -> list[dict]:
+    """Recursively extract all assets from nested strategy blocks (conditional, weight, etc.)."""
+    results = []
+    if not isinstance(block, dict):
+        return results
+
+    # this block is an asset
+    if block.get("blockType") == "asset" and block.get("assetId"):
+        results.append({"assetId": block["assetId"]})
+        return results
+
+    # check children (can be list or dict)
+    children = block.get("children", [])
+    if isinstance(children, dict):
+        # weight/conditional block — recurse into its children
+        inner = children.get("children", [])
+        if isinstance(inner, list):
+            for child in inner:
+                results.extend(extract_assets_recursive(child, conn))
+        # also check the block itself
+        if children.get("blockType") == "asset" and children.get("assetId"):
+            results.append({"assetId": children["assetId"]})
+    elif isinstance(children, list):
+        for child in children:
+            results.extend(extract_assets_recursive(child, conn))
+
+    return results
 
 def parse_portfolio(sid: str, conn: sqlite3.Connection | None = None) -> Portfolio | None:
     strat = fetch_strategy(sid)
@@ -108,31 +146,51 @@ def parse_portfolio(sid: str, conn: sqlite3.Connection | None = None) -> Portfol
         bp = data["strategyBlueprint"]
         sd = bp["strategy_data"]["entry"]
         children_block = sd.get("children", {})
-        children = children_block.get("children", [])
+
+        # recursively extract all assets
+        raw_assets = extract_assets_recursive(sd, conn)
+        # deduplicate by asset ID
+        seen = set()
+        unique_assets = []
+        for a in raw_assets:
+            aid = a["assetId"]
+            if aid and aid not in seen:
+                seen.add(aid)
+                unique_assets.append(a)
+
+        # get weight info from top-level children block
         weight_type = children_block.get("weightType", "equal")
         weightings = children_block.get("weightings", [])
 
         assets = []
-        n = len(children)
-        for i, child in enumerate(children):
-            aid = child.get("assetId", "")
+        n = len(unique_assets)
+        for i, raw in enumerate(unique_assets):
+            aid = raw["assetId"]
             parts = aid.split(":")
             chain = parts[1] if len(parts) > 1 else "8453"
             sym, name = resolve_symbol(aid, conn)
 
             # determine weight
-            if weight_type == "equal" or not weightings:
+            if weight_type == "equal" or not weightings or i >= len(weightings):
                 w = round(100.0 / n, 2) if n > 0 else 0
             else:
-                raw = float(weightings[i]) if i < len(weightings) else 0
-                # if raw values sum to ~1, they're fractions; if sum to ~100, they're percentages
+                raw_val = float(weightings[i])
                 raw_sum = sum(float(x) for x in weightings if x)
                 if raw_sum > 10:
-                    w = round(raw, 2)  # already percentages
+                    w = round(raw_val, 2)
                 else:
-                    w = round(raw * 100, 2)  # fractions → percentages
+                    w = round(raw_val * 100, 2)
 
             assets.append(Asset(asset_id=aid, symbol=sym, name=name, weight=w, chain_id=chain))
+
+        # normalize weights to sum to 100% (only for assets with weight > 0)
+        weighted = [a for a in assets if a.weight > 0]
+        total_w = sum(a.weight for a in weighted)
+        if total_w > 0 and abs(total_w - 100) > 1:
+            for a in weighted:
+                a.weight = round(a.weight / total_w * 100, 2)
+        # keep 0-weight assets at end (historical, not currently held)
+        assets = weighted + [a for a in assets if a.weight <= 0]
 
         owner = bp.get("owner_address", "")
         name = bp.get("blueprint_name", "")
@@ -140,13 +198,31 @@ def parse_portfolio(sid: str, conn: sqlite3.Connection | None = None) -> Portfol
         print(f"    parse error: {e}")
         return None
 
-    # PnL — also enriches asset symbols from PnL response
+    # History — get ALL assets ever in this portfolio (catches rebalance residuals)
+    hist = trpc_get("strategyInstances.getAllAssetsInStrategyInstanceHistory", {"strategyInstanceId": sid})
+    if hist:
+        try:
+            hdata = hist["result"]["data"]["json"]
+            existing_aids = {a.asset_id for a in assets}
+            for aid in hdata.get("baseAssets", []) + hdata.get("defiAssets", []):
+                if aid and aid not in existing_aids:
+                    parts = aid.split(":")
+                    chain = parts[1] if len(parts) > 1 else "8453"
+                    sym, nm = resolve_symbol(aid, conn)
+                    assets.append(Asset(asset_id=aid, symbol=sym, name=nm, weight=0, chain_id=chain))
+                    existing_aids.add(aid)
+        except:
+            pass
+
+    # PnL — merge actual holdings with template
     cv, tcb, rpnl = 0.0, 0.0, 0.0
     pnl = fetch_pnl(sid)
     if pnl:
         try:
             pdata = pnl["result"]["data"]["json"]
-            pnl_map = {}
+            existing_aids = {a.asset_id for a in assets}
+            pnl_holdings = []
+
             for pa in pdata.get("assets", []):
                 aid = pa.get("assetId", "")
                 sym = pa.get("symbol", "")
@@ -154,13 +230,43 @@ def parse_portfolio(sid: str, conn: sqlite3.Connection | None = None) -> Portfol
                 rpnl += pa.get("realizedPnL", 0)
                 amt = float(pa.get("currentAmount", 0))
                 price = float(pa.get("currentPrice", 0))
-                cv += amt * price
-                if aid and sym:
-                    pnl_map[aid] = sym
-            # backfill symbols from PnL if missing
-            for a in assets:
-                if (a.symbol == a.asset_id[:10] or a.symbol == "?") and a.asset_id in pnl_map:
-                    a.symbol = pnl_map[a.asset_id]
+                val = amt * price
+                cv += val
+
+                # backfill symbols for template assets
+                for a in assets:
+                    if a.asset_id == aid and (not a.symbol or a.symbol.startswith("0x")):
+                        a.symbol = sym or a.symbol
+
+                # track PnL holdings with actual value
+                if aid and val > 0.01:
+                    pnl_holdings.append({"aid": aid, "sym": sym, "val": val})
+
+            # add assets that are in PnL but not in template (rebalance residuals)
+            if cv > 0:
+                for h in pnl_holdings:
+                    if h["aid"] not in existing_aids and h["val"] > 0.01:
+                        parts = h["aid"].split(":")
+                        chain = parts[1] if len(parts) > 1 else "8453"
+                        sym_resolved, name_resolved = resolve_symbol(h["aid"], conn)
+                        sym_final = h["sym"] or sym_resolved
+                        weight_pct = round(h["val"] / cv * 100, 2)
+                        assets.append(Asset(
+                            asset_id=h["aid"], symbol=sym_final,
+                            name=name_resolved, weight=weight_pct, chain_id=chain,
+                        ))
+                        existing_aids.add(h["aid"])
+
+                # recalculate weights based on actual value if we have PnL data
+                total_val = sum(
+                    next((hh["val"] for hh in pnl_holdings if hh["aid"] == a.asset_id), 0)
+                    for a in assets
+                )
+                if total_val > 0:
+                    for a in assets:
+                        val = next((hh["val"] for hh in pnl_holdings if hh["aid"] == a.asset_id), 0)
+                        if val > 0:
+                            a.weight = round(val / total_val * 100, 2)
         except:
             pass
 
