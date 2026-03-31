@@ -73,7 +73,8 @@ def fetch_strategy(sid: str) -> dict | None:
     return trpc_get("strategyInstances.getStrategyInstance", {"strategyInstanceId": sid})
 
 def fetch_pnl(sid: str) -> dict | None:
-    return trpc_get("pnl.getCostBasisAndPnL", {"includeTrades": True, "realtime": True, "strategyInstanceId": sid})
+    # param is strategyId, not strategyInstanceId
+    return trpc_get("pnl.getCostBasisAndPnL", {"includeTrades": True, "realtime": True, "strategyId": sid})
 
 def fetch_schedule(sid: str) -> dict | None:
     return trpc_get("schedules.getStrategyInstanceSchedule", {"strategyInstanceId": sid})
@@ -214,14 +215,14 @@ def parse_portfolio(sid: str, conn: sqlite3.Connection | None = None) -> Portfol
         except:
             pass
 
-    # PnL — merge actual holdings with template
+    # PnL — use ACTUAL holdings (overrides template weights with real balances)
     cv, tcb, rpnl = 0.0, 0.0, 0.0
     pnl = fetch_pnl(sid)
     if pnl:
         try:
             pdata = pnl["result"]["data"]["json"]
             existing_aids = {a.asset_id for a in assets}
-            pnl_holdings = []
+            pnl_map: dict[str, dict] = {}  # aid -> {sym, val}
 
             for pa in pdata.get("assets", []):
                 aid = pa.get("assetId", "")
@@ -232,41 +233,53 @@ def parse_portfolio(sid: str, conn: sqlite3.Connection | None = None) -> Portfol
                 price = float(pa.get("currentPrice", 0))
                 val = amt * price
                 cv += val
+                if aid:
+                    pnl_map[aid] = {"sym": sym, "val": val, "amt": amt, "price": price}
 
-                # backfill symbols for template assets
+            if cv > 0.01:
+                # rebuild assets from PnL data (ground truth)
+                new_assets = []
+                all_aids = set()
+
+                # first: assets with actual value from PnL
+                for aid, h in pnl_map.items():
+                    if h["val"] < 0.001:
+                        continue
+                    parts = aid.split(":")
+                    chain = parts[1] if len(parts) > 1 else "8453"
+                    # find symbol: PnL > existing > resolve
+                    sym = h["sym"]
+                    if not sym:
+                        existing = next((a for a in assets if a.asset_id == aid), None)
+                        sym = existing.symbol if existing else ""
+                    if not sym or sym.startswith("0x"):
+                        sym, _ = resolve_symbol(aid, conn)
+                    name = next((a.name for a in assets if a.asset_id == aid), "")
+                    w = round(h["val"] / cv * 100, 2)
+                    new_assets.append(Asset(asset_id=aid, symbol=sym, name=name, weight=w, chain_id=chain))
+                    all_aids.add(aid)
+
+                # second: template assets with $0 balance go to historical (weight=0)
                 for a in assets:
-                    if a.asset_id == aid and (not a.symbol or a.symbol.startswith("0x")):
-                        a.symbol = sym or a.symbol
+                    if a.asset_id not in all_aids:
+                        a.weight = 0
+                        new_assets.append(a)
+                        all_aids.add(a.asset_id)
 
-                # track PnL holdings with actual value
-                if aid and val > 0.01:
-                    pnl_holdings.append({"aid": aid, "sym": sym, "val": val})
+                # third: history assets not in PnL or template
+                for a in assets:
+                    if a.asset_id not in all_aids:
+                        a.weight = 0
+                        new_assets.append(a)
 
-            # add assets that are in PnL but not in template (rebalance residuals)
-            if cv > 0:
-                for h in pnl_holdings:
-                    if h["aid"] not in existing_aids and h["val"] > 0.01:
-                        parts = h["aid"].split(":")
-                        chain = parts[1] if len(parts) > 1 else "8453"
-                        sym_resolved, name_resolved = resolve_symbol(h["aid"], conn)
-                        sym_final = h["sym"] or sym_resolved
-                        weight_pct = round(h["val"] / cv * 100, 2)
-                        assets.append(Asset(
-                            asset_id=h["aid"], symbol=sym_final,
-                            name=name_resolved, weight=weight_pct, chain_id=chain,
-                        ))
-                        existing_aids.add(h["aid"])
-
-                # recalculate weights based on actual value if we have PnL data
-                total_val = sum(
-                    next((hh["val"] for hh in pnl_holdings if hh["aid"] == a.asset_id), 0)
-                    for a in assets
-                )
-                if total_val > 0:
-                    for a in assets:
-                        val = next((hh["val"] for hh in pnl_holdings if hh["aid"] == a.asset_id), 0)
-                        if val > 0:
-                            a.weight = round(val / total_val * 100, 2)
+                assets = new_assets
+            else:
+                # PnL returned but cv=0 — just backfill symbols
+                for a in assets:
+                    if a.asset_id in pnl_map:
+                        s = pnl_map[a.asset_id]["sym"]
+                        if s and (not a.symbol or a.symbol.startswith("0x")):
+                            a.symbol = s
         except:
             pass
 
